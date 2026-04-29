@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import { Download, Upload, Plus, X, Edit3, Trash2, Eye, EyeOff, Save, RefreshCw } from "lucide-react";
 import { createClient } from "@supabase/supabase-js";
 
@@ -899,7 +900,7 @@ function Popover({ data, songs }) {
     }
   }
 
-  return (
+  return createPortal(
     <div
       ref={popoverRef}
       className="popover"
@@ -924,7 +925,8 @@ function Popover({ data, songs }) {
         ))}
       </div>
       {interpretation && <div className="popover-interp">{interpretation}</div>}
-    </div>
+    </div>,
+    document.body
   );
 }
 
