@@ -143,7 +143,6 @@ const METRICS = [
   { key: "net_new_listeners", label: "Net New Listeners", group: "Volume", format: "int", agg: "sum", higherBetter: true, derived: true },
   { key: "cum_listeners", label: "Cumulative Listeners", group: "Volume", format: "int", agg: "last", higherBetter: true, manual: true },
   { key: "streams", label: "Streams", group: "Volume", format: "int", agg: "sum", higherBetter: true, manual: true },
-  { key: "net_new_streams", label: "Net New Streams", group: "Volume", format: "int", agg: "sum", higherBetter: true, derived: true },
   { key: "cum_streams", label: "Cumulative Streams", group: "Volume", format: "int", agg: "last", higherBetter: true, manual: true },
   { key: "pi", label: "Popularity Index", group: "Volume", format: "int", agg: "last", higherBetter: true, manual: true },
 
@@ -159,9 +158,9 @@ const METRICS = [
   { key: "cpl", label: "Cost / Listener", group: "Spend", format: "currency_precise", agg: "weighted_cpl", higherBetter: false, derived: true },
   { key: "cps", label: "Cost / Save", group: "Spend", format: "currency_precise", agg: "weighted_cps", higherBetter: false, derived: true },
 
-  { key: "radio", label: "Radio Streams", group: "Algorithm", format: "int", agg: "sum", higherBetter: true, manual: true },
-  { key: "dw", label: "Discover Weekly", group: "Algorithm", format: "int", agg: "sum", higherBetter: true, manual: true },
-  { key: "rr", label: "Release Radar", group: "Algorithm", format: "int", agg: "sum", higherBetter: true, manual: true },
+  { key: "radio", label: "Cumulative Radio Streams", group: "Algorithm", format: "int", agg: "last", higherBetter: true, manual: true },
+  { key: "dw", label: "Cumulative DW Streams", group: "Algorithm", format: "int", agg: "last", higherBetter: true, manual: true },
+  { key: "rr", label: "Cumulative RR Streams", group: "Algorithm", format: "int", agg: "last", higherBetter: true, manual: true },
   { key: "algo_pct", label: "Algo Streams %", group: "Algorithm", format: "percent", agg: "weighted_algo", higherBetter: true, derived: true },
 ];
 
@@ -190,7 +189,7 @@ const fmt = (val, format) => {
     case "decimal": return val.toFixed(2);
     case "percent": return `${val.toFixed(1)}%`;
     case "currency": return `$${val.toFixed(2)}`;
-    case "currency_precise": return Math.abs(val) < 1 ? `$${val.toFixed(3)}` : `$${val.toFixed(2)}`;
+    case "currency_precise": return `$${val.toFixed(2)}`;
     default: return String(val);
   }
 };
@@ -198,18 +197,12 @@ const fmt = (val, format) => {
 const computeDerivedDays = (days) => {
   let cumSpend = 0;
   let prevCumListeners = 0;
-  let prevCumStreams = 0;
   return days.map((d) => {
     cumSpend += (d.spend || 0);
     let nnl = null;
-    let nns = null;
     if (d.cum_listeners !== null && d.cum_listeners !== undefined) {
       nnl = d.cum_listeners - prevCumListeners;
       prevCumListeners = d.cum_listeners;
-    }
-    if (d.cum_streams !== null && d.cum_streams !== undefined) {
-      nns = d.cum_streams - prevCumStreams;
-      prevCumStreams = d.cum_streams;
     }
     const denom = (nnl !== null && nnl > 0) ? nnl : (d.listeners || null);
     const save_rate = denom && d.saves !== null ? (d.saves / denom) * 100 : null;
@@ -220,10 +213,11 @@ const computeDerivedDays = (days) => {
     const cpl = denom && d.spend && d.spend > 0 ? d.spend / denom : null;
     const cps = d.saves && d.spend && d.spend > 0 ? d.spend / d.saves : null;
     const algoTotal = (d.radio || 0) + (d.dw || 0) + (d.rr || 0);
-    const algo_pct = d.streams && (d.radio !== null || d.dw !== null || d.rr !== null)
-      ? (algoTotal / d.streams) * 100 : null;
+    const algoHasData = d.radio !== null || d.dw !== null || d.rr !== null;
+    const algo_pct = algoHasData && d.cum_streams && d.cum_streams > 0
+      ? (algoTotal / d.cum_streams) * 100 : null;
     return {
-      ...d, cum_spend: cumSpend, net_new_listeners: nnl, net_new_streams: nns,
+      ...d, cum_spend: cumSpend, net_new_listeners: nnl,
       save_rate, playlist_rate, intent_rate, spl, cpl, cps, algo_pct,
     };
   });
@@ -270,9 +264,17 @@ const computeAggregate = (days, metricKey, throughDay) => {
       return sv > 0 ? sp / sv : null;
     }
     case "weighted_algo": {
-      const ta = slice.reduce((s, d) => s + (d.radio || 0) + (d.dw || 0) + (d.rr || 0), 0);
-      const ts = slice.reduce((s, d) => s + (d.streams || 0), 0);
-      return ts > 0 ? (ta / ts) * 100 : null;
+      // Algo fields are cumulative. The "% through Day N" is just the last
+      // filled algo row's totals divided by the last filled cum_streams.
+      const lastAlgo = [...slice].reverse().find(d =>
+        d.radio !== null || d.dw !== null || d.rr !== null
+      );
+      const lastCumStreams = [...slice].reverse().find(d =>
+        d.cum_streams !== null && d.cum_streams !== undefined
+      );
+      if (!lastAlgo || !lastCumStreams || lastCumStreams.cum_streams <= 0) return null;
+      const algoTotal = (lastAlgo.radio || 0) + (lastAlgo.dw || 0) + (lastAlgo.rr || 0);
+      return (algoTotal / lastCumStreams.cum_streams) * 100;
     }
     default: return null;
   }
@@ -281,6 +283,23 @@ const computeAggregate = (days, metricKey, throughDay) => {
 const getCurrentDay = (song) => {
   const lastDay = [...song.days].reverse().find(d => d.listeners !== null);
   return lastDay ? lastDay.day : 0;
+};
+
+// Required input fields that must be filled for a day to count as "complete"
+// (algo fields are optional - we don't always have that data)
+const REQUIRED_INPUT_FIELDS = ["listeners", "cum_listeners", "streams", "cum_streams", "pi", "saves", "playlist_adds", "spend"];
+
+const getMissingFields = (day) => {
+  return REQUIRED_INPUT_FIELDS.filter(f => day[f] === null || day[f] === undefined);
+};
+
+const isDayComplete = (day) => getMissingFields(day).length === 0;
+
+// A song is "Released" when all 31 days have every required field filled.
+// Otherwise it's "Active" (or unstarted, but we treat that as Active).
+const isSongComplete = (song) => {
+  if (!song?.days || song.days.length < 31) return false;
+  return song.days.every(d => isDayComplete(d));
 };
 
 const getZone = (value, day, benchmarks, metric) => {
@@ -404,6 +423,7 @@ function App() {
   };
 
   const reloadFromSupabase = async () => {
+    if (!confirm("Reload from cloud? Any unsaved changes will be lost.")) return;
     setLoadStatus("loading");
     try {
       const { data, error } = await supabase
@@ -632,8 +652,9 @@ function SummaryPanel({ currentDay, activeSongId, onToggleHidden, onDelete, hidd
                 <div className="summary-name-block">
                   <div className="summary-name">{song.name}</div>
                   <div className="summary-date">
-                    {isActive && <span className="active-tag">ACTIVE</span>}
-                    {!isActive && <span className="released-tag">BENCHMARK</span>}
+                    {isSongComplete(song)
+                      ? <span className="released-tag">RELEASED</span>
+                      : <span className="active-tag">ACTIVE</span>}
                     <span>{formatReleaseDate(song.releaseDate)}</span>
                   </div>
                 </div>
@@ -731,7 +752,7 @@ function ComparisonTable({ songs, selectedMetric, currentDay, activeSongId, benc
             </tr>
             <tr className="totals-row">
               <th className="day-col totals-label">
-                {metric.agg === "last" ? "Latest" : metric.agg === "sum" ? "Total" : "Avg"}
+                Through Day {currentDay}
               </th>
               {songs.map(s => {
                 const total = computeAggregate(s.days, selectedMetric, currentDay);
@@ -842,19 +863,32 @@ function Popover({ data, songs }) {
       interpretation = `${hovered.song.name} is ${pctDiff}% ${direction} ${top.song.name} on Day ${data.day}.`;
     }
   }
-  // Position popover near cursor with smart edge avoidance.
-  // Default: 16px to the right, 16px below cursor.
-  // If too close to right edge, flip to left of cursor.
-  // If too close to bottom edge, flip above cursor.
+  // Position popover right next to cursor. Prefer below-right by default.
+  // Flip horizontally if hitting right edge, vertically if hitting bottom.
+  // ALWAYS clamp inside viewport so it never disappears off-screen.
   const POPOVER_W = 320;
-  const POPOVER_H = sorted.length * 28 + 90;
-  const margin = 16;
-  let x = data.x + margin;
-  let y = data.y + margin;
-  if (x + POPOVER_W > window.innerWidth - 8) x = data.x - POPOVER_W - margin;
-  if (y + POPOVER_H > window.innerHeight - 8) y = data.y - POPOVER_H - margin;
-  if (x < 8) x = 8;
-  if (y < 8) y = 8;
+  const POPOVER_H = sorted.length * 32 + 100;
+  const offset = 14;
+  const padding = 12;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+
+  // Default position: bottom-right of cursor
+  let x = data.x + offset;
+  let y = data.y + offset;
+
+  // Flip to left of cursor if hitting right edge
+  if (x + POPOVER_W + padding > vw) {
+    x = data.x - POPOVER_W - offset;
+  }
+  // Flip above cursor if hitting bottom edge
+  if (y + POPOVER_H + padding > vh) {
+    y = data.y - POPOVER_H - offset;
+  }
+  // Final clamp - guarantee it's on screen
+  x = Math.max(padding, Math.min(vw - POPOVER_W - padding, x));
+  y = Math.max(padding, Math.min(vh - POPOVER_H - padding, y));
+
   return (
     <div className="popover" style={{ left: x, top: y }}>
       <div className="popover-header">
@@ -1218,10 +1252,23 @@ function Styles() {
       .popover-day { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
       .popover-metric { font-size: 10px; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
       .popover-rankings { display: flex; flex-direction: column; gap: 4px; }
-      .popover-row { display: grid; grid-template-columns: 18px 10px 1fr auto; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 7px; font-size: 12px; }
+      .popover-row { display: grid; grid-template-columns: 22px 10px 1fr auto; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 7px; font-size: 12px; }
       .popover-row.highlighted { background: var(--glass-bg-strong); border: 0.5px solid var(--glass-border-strong); }
-      .popover-rank { font-size: 11px; font-weight: 700; color: var(--text-tertiary); font-feature-settings: "tnum"; }
-      .popover-row.highlighted .popover-rank { color: var(--highlight-text); }
+      .popover-rank {
+        font-size: 10px; font-weight: 700; color: var(--text-tertiary);
+        font-feature-settings: "tnum";
+        background: var(--glass-bg-subtle);
+        border: 0.5px solid var(--glass-border);
+        border-radius: 5px;
+        padding: 2px 0;
+        text-align: center;
+        width: 20px;
+      }
+      .popover-row.highlighted .popover-rank {
+        color: var(--bg-base);
+        background: var(--text-primary);
+        border-color: var(--text-primary);
+      }
       .popover-marker { width: 8px; height: 8px; border-radius: 50%; }
       .popover-name { color: var(--text-primary); font-weight: 500; letter-spacing: -0.008em; }
       .popover-value { font-weight: 700; font-feature-settings: "tnum"; color: var(--text-primary); }
