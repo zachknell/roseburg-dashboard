@@ -295,11 +295,13 @@ const getMissingFields = (day) => {
 
 const isDayComplete = (day) => getMissingFields(day).length === 0;
 
-// A song is "Released" when all 31 days have every required field filled.
-// Otherwise it's "Active" (or unstarted, but we treat that as Active).
+// A song is "Released" when all 31 days have at least the streams field filled.
+// Other fields (PI, spend, saves, etc.) may legitimately be null on some days
+// (PI doesn't appear early, spend depends on whether ads ran, etc.)
+// Streams is the only field that's reliably non-null every day post-release.
 const isSongComplete = (song) => {
   if (!song?.days || song.days.length < 31) return false;
-  return song.days.every(d => isDayComplete(d));
+  return song.days.every(d => d.streams !== null && d.streams !== undefined);
 };
 
 const getZone = (value, day, benchmarks, metric) => {
@@ -840,7 +842,40 @@ function ComparisonTable({ songs, selectedMetric, currentDay, activeSongId, benc
 }
 
 function Popover({ data, songs }) {
+  const popoverRef = useRef(null);
+  const [pos, setPos] = useState({ x: -9999, y: -9999, ready: false });
+
   const metric = METRICS.find(m => m.key === data.metric);
+
+  // Measure actual rendered popover size and position relative to cursor.
+  // This runs AFTER the popover renders invisibly off-screen, so we know
+  // its real dimensions before deciding final placement.
+  useEffect(() => {
+    if (!popoverRef.current) return;
+    const rect = popoverRef.current.getBoundingClientRect();
+    const w = rect.width;
+    const h = rect.height;
+    const offset = 14;
+    const padding = 12;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+
+    // Default: below-right of cursor
+    let x = data.x + offset;
+    let y = data.y + offset;
+
+    // Flip horizontally if too close to right edge
+    if (x + w + padding > vw) x = data.x - w - offset;
+    // Flip vertically if too close to bottom edge
+    if (y + h + padding > vh) y = data.y - h - offset;
+
+    // Final clamp - guarantee fully on screen
+    x = Math.max(padding, Math.min(vw - w - padding, x));
+    y = Math.max(padding, Math.min(vh - h - padding, y));
+
+    setPos({ x, y, ready: true });
+  }, [data.x, data.y, data.day, data.metric, data.hoveredSongId]);
+
   if (!metric) return null;
   const values = songs.map(s => {
     const d = s.days.find(dd => dd.day === data.day);
@@ -863,34 +898,17 @@ function Popover({ data, songs }) {
       interpretation = `${hovered.song.name} is ${pctDiff}% ${direction} ${top.song.name} on Day ${data.day}.`;
     }
   }
-  // Position popover right next to cursor. Prefer below-right by default.
-  // Flip horizontally if hitting right edge, vertically if hitting bottom.
-  // ALWAYS clamp inside viewport so it never disappears off-screen.
-  const POPOVER_W = 320;
-  const POPOVER_H = sorted.length * 32 + 100;
-  const offset = 14;
-  const padding = 12;
-  const vw = window.innerWidth;
-  const vh = window.innerHeight;
-
-  // Default position: bottom-right of cursor
-  let x = data.x + offset;
-  let y = data.y + offset;
-
-  // Flip to left of cursor if hitting right edge
-  if (x + POPOVER_W + padding > vw) {
-    x = data.x - POPOVER_W - offset;
-  }
-  // Flip above cursor if hitting bottom edge
-  if (y + POPOVER_H + padding > vh) {
-    y = data.y - POPOVER_H - offset;
-  }
-  // Final clamp - guarantee it's on screen
-  x = Math.max(padding, Math.min(vw - POPOVER_W - padding, x));
-  y = Math.max(padding, Math.min(vh - POPOVER_H - padding, y));
 
   return (
-    <div className="popover" style={{ left: x, top: y }}>
+    <div
+      ref={popoverRef}
+      className="popover"
+      style={{
+        left: pos.x,
+        top: pos.y,
+        opacity: pos.ready ? 1 : 0,
+      }}
+    >
       <div className="popover-header">
         <div className="popover-day">Day {data.day} · {dayOfWeek(data.day)}</div>
         <div className="popover-metric">{metric.label}</div>
@@ -1245,9 +1263,8 @@ function Styles() {
         border: 0.5px solid var(--glass-border-strong); border-radius: 16px;
         padding: 14px 16px; box-shadow: var(--glass-shadow-lg);
         width: 320px; z-index: 100; pointer-events: none;
-        animation: popover-in 0.12s ease;
+        transition: opacity 0.12s ease;
       }
-      @keyframes popover-in { from { opacity: 0; } to { opacity: 1; } }
       .popover-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; padding-bottom: 10px; border-bottom: 0.5px solid var(--glass-border); }
       .popover-day { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
       .popover-metric { font-size: 10px; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
